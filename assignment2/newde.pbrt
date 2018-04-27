@@ -1,7 +1,7 @@
 Film "image" "string filename" ["newde.exr"]
 	"integer xresolution" [300] "integer yresolution" [300]
 
-Sampler "halton" "integer pixelsamples" [32] 
+Sampler "halton" "integer pixelsamples" [256] 
 
 Integrator "path" "integer maxdepth" [1]
 
