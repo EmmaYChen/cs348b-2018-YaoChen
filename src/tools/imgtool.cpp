@@ -14,6 +14,9 @@
 #include "pbrt.h"
 #include "spectrum.h"
 #include "parallel.h"
+#include <math.h>
+#include <vector>
+
 extern "C" {
 #include "ext/ArHosekSkyModel.h"
 }
@@ -79,6 +82,25 @@ makesky options:
     --resolution <r>   Vertical resolution of generated environment map.
                        (Horizontal resolution is twice this value.)
                        Default: 2048
+                       
+lightfield options:
+    --camsperdim <x> <y>                    Number of data cameras in the X and 
+                                            Y direction, respectively
+    --camerapos <x> <y> <z>                 Position of the desired camera for 
+                                            reconstruction (treating the data
+                                            camera plane as z = 0)
+    --filterwidth <fw>                      Width of the reconstruction filter (in
+                                            meters on the camera plane)
+    --focalplanez <fz>                      Z position of the focal plane for 
+                                            reconstruction (treating the data
+                                            camera plane as z = 0)
+    --griddim <xmin> <xmax> <ymin> <ymax>   The bounding box of the data cameras
+                                            positions in the x and y dimensions 
+                                            (in meters)
+    --inputfov <f>                          FOV (in degrees) of the input 
+                                            lightfield data cameras
+    --outputfov <f>                         FOV (in degrees) of the output image
+    --outputdim <w> <h>                     Output size in pixels per dimension
 
 )");
     exit(1);
@@ -761,6 +783,189 @@ int convert(int argc, char *argv[]) {
     return 0;
 }
 
+
+void Interpolate(RGBSpectrum &interpolatedPixel, int u, int v, float ux, float uy, std::unique_ptr<RGBSpectrum[]> & image, 
+                 Vector2i orginalres, Point2i res){
+    
+    float image_x =  ux * (orginalres.x - 1);
+    float image_y =  uy * (orginalres.x - 1);
+    int floor_image_x =  int (image_x);
+    int floor_image_y =  int (image_y);
+    
+    if (image_x >= orginalres.x - 1 || image_y >= orginalres.y - 1) return ;
+    
+    double fx1 = image_x - int(image_x);
+    double fx2 = 1 - fx1;
+    double fy1 = image_y - int(image_y);
+    double fy2 = 1 - fy1;
+
+    double w1 = fx2*fy2;
+    double w2 = fx1*fy2;
+    double w3 = fx2*fy1;
+    double w4 = fx1*fy1;
+
+    int image_idx = u * res.x * orginalres.y + v * orginalres.x;
+
+    RGBSpectrum p1 = image[image_idx + floor_image_y * res.y + floor_image_x];
+    RGBSpectrum p2 = image[image_idx + floor_image_y * res.y + floor_image_x + 1];
+    RGBSpectrum p3 = image[image_idx + (floor_image_y + 1) * res.y + floor_image_x];
+    RGBSpectrum p4 = image[image_idx + (floor_image_y + 1) * res.y + floor_image_x + 1];
+
+    interpolatedPixel = w1*p1 + w2*p2 + w3*p3 + w4*p4;
+    //interpolatedPixel = image[image_idx + floor_image_y * res.y + floor_image_x];
+
+}
+
+
+int lightfield(int argc, char *argv[]) {
+
+    const char *outfile = "resolvedLightfield.exr";
+    Bounds2f griddim(Point2f(0, 0));
+    float inputfov = 90.0f;
+    float outputfov = 45.0f;
+    Vector2i camerasPerDim(1, 1);
+    Point2i outputDim(256, 256);
+    float filterWidth = 0.05f;
+    float focalPlaneZ = 10.0f;
+    Point3f cameraPos(0,0,-0.02f);
+    int i;
+    for (i = 0; i < argc; ++i) {
+        if (argv[i][0] != '-') break;
+        if (!strcmp(argv[i], "--inputfov")) {
+            ++i;
+            inputfov = atof(argv[i]);
+        } else if (!strcmp(argv[i], "--outputfov")) {
+            ++i;
+            outputfov = atof(argv[i]);
+        } else if (!strcmp(argv[i], "--camsperdim")) {
+            ++i;
+            camerasPerDim.x = atoi(argv[i]);
+            ++i;
+            camerasPerDim.y = atoi(argv[i]);
+        } else if (!strcmp(argv[i], "--outputdim")) {
+            ++i;
+            outputDim.x = atoi(argv[i]);
+            ++i;
+            outputDim.y = atoi(argv[i]);
+        } else if (!strcmp(argv[i], "--camerapos")) {
+            ++i;
+            cameraPos.x = atof(argv[i]);
+            ++i;
+            cameraPos.y = atof(argv[i]);
+            ++i;
+            cameraPos.z = atof(argv[i]);
+        } else if (!strcmp(argv[i], "--griddim")) {
+            ++i;
+            griddim.pMin.x = atof(argv[i]);
+            ++i;
+            griddim.pMax.x = atof(argv[i]);
+            ++i;
+            griddim.pMin.y = atof(argv[i]);
+            ++i;
+            griddim.pMax.y = atof(argv[i]);
+        } else if (!strcmp(argv[i], "--filterwidth")) {
+            ++i;
+            filterWidth = atof(argv[i]);
+        }  else if (!strcmp(argv[i], "--focalplanez")) {
+            ++i;
+            focalPlaneZ = atof(argv[i]);
+        } else {
+            usage();
+        }
+    }
+    if (i + 1 >= argc)
+        usage("missing second filename for \"lightfield\"");
+    else if (i >= argc)
+        usage("missing filenames for \"lightfield\"");
+
+    const char *inFilename = argv[i], *outFilename = argv[i + 1];
+    Point2i res;
+    std::unique_ptr<RGBSpectrum[]> image(ReadImage(inFilename, &res));
+    if (!image) {
+        fprintf(stderr, "%s: unable to read image\n", inFilename);
+        return 1;
+    }
+
+    std::unique_ptr<RGBSpectrum[]> outputImage(new RGBSpectrum[outputDim.x * outputDim.y]);
+
+    Vector2i orginalres = Vector2i(res.x / camerasPerDim.x , res.y / camerasPerDim.y);
+
+    // calcuate camera position
+    Point3f CameraGrid[camerasPerDim.x][camerasPerDim.y];
+    float delta_x = (griddim.pMax.x - griddim.pMin.x)/ (camerasPerDim.x - 1);
+    float delta_y = (griddim.pMax.y - griddim.pMin.y)/ (camerasPerDim.y - 1);
+
+    for (int i = 0; i < camerasPerDim.y; ++i)
+        for(int j = 0; j< camerasPerDim.x; ++j){
+
+            float x = delta_x * (j - camerasPerDim.x / 2) + delta_x/2;
+            float y = - delta_y * ((i - camerasPerDim.y / 2) + delta_y/2);
+            CameraGrid[i][j] = Point3f(x,y,0.0);
+    }
+    
+    // reconstruct  
+    for (int i = 0; i < outputDim.x; i++) 
+        for (int j = 0; j < outputDim.y; j++) { 
+            
+            // calcarate ray direction vector
+            float dy = -(i - float(outputDim.y - 1) / 2) / (outputDim.y - 1) * 2;
+            float dx = (j - float(outputDim.x - 1) / 2) / (outputDim.x - 1) * 2;
+            float outputfov_tan = std::tan(outputfov/(2.0 * 180) * M_PI);
+            Vector3f direction = Vector3f(outputfov_tan * dx, outputfov_tan * dy, 1.0);
+            
+            // calculate fg, st
+            float distance = focalPlaneZ + std::abs(cameraPos.z);
+            Point3f fg = cameraPos + distance * direction;
+            Point3f st = cameraPos + std::abs(cameraPos.z) * direction;
+
+            std::vector<float> weights;
+            std::vector<RGBSpectrum> pixels;
+            for(int l = 0; l < camerasPerDim.x; l++) 
+                for(int m = 0; m < camerasPerDim.y; m++){
+                    
+                    // find datacamera in the aperture
+                    float inputfov_sin = std::sin(inputfov/(2.0 * 180) * M_PI);
+                    float inputfov_tan = std::tan(inputfov/(2.0 * 180) * M_PI);
+                    Vector3f fg_st = Normalize(fg - CameraGrid[l][m]);
+                    Float st_st = Distance(CameraGrid[l][m], st);
+                    
+                    if (st_st <= filterWidth && st_st!= 0)
+                        if (std::abs(fg_st.x) <= inputfov_sin && std::abs(fg_st.y) <= inputfov_sin){
+                        // find uv on the output image
+                        Float ux =  0.5 * (1 + fg_st.x / fg_st.z / inputfov_tan);
+                        Float uy = 0.5 * (1 - fg_st.y / fg_st.z / inputfov_tan);
+
+                        // intepolate 
+                        RGBSpectrum interpolatedPixel;
+                        Interpolate(interpolatedPixel, l, m, ux, uy, image, orginalres, res);
+                        pixels.push_back(interpolatedPixel);
+                        float weight = 1.0/st_st;
+                        weights.push_back(weight);
+                    }
+                       
+            }
+
+            // sum weights 
+            float weight_sum = 0.0;
+            for (int l = 0; l <  weights.size(); l++){
+                weight_sum += weights[l];
+            }
+
+            // normalize the weights and add up together 
+            if (weight_sum > 0){
+                outputImage[ i * outputDim.x + j] = float (weights[0])/ weight_sum * pixels[0];
+                for (int l = 1; l < weights.size(); l++)
+                    outputImage[ i * outputDim.x + j] += float (weights[l])/ weight_sum * pixels[l];
+            }
+           
+            
+        }
+
+    WriteImage(outFilename, (Float *)outputImage.get(), Bounds2i(Point2i(0, 0), outputDim),
+        outputDim);
+    return 0;
+} 
+
 int main(int argc, char *argv[]) {
     google::InitGoogleLogging(argv[0]);
     FLAGS_stderrthreshold = 1; // Warning and above.
@@ -779,6 +984,8 @@ int main(int argc, char *argv[]) {
         return info(argc - 2, argv + 2);
     else if (!strcmp(argv[1], "makesky"))
         return makesky(argc - 2, argv + 2);
+    else if (!strcmp(argv[1], "lightfield"))
+        return lightfield(argc - 2, argv + 2);
     else
         usage("unknown command \"%s\"", argv[1]);
 
