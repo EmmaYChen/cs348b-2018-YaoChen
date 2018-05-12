@@ -47,6 +47,7 @@
 #include "cameras/orthographic.h"
 #include "cameras/perspective.h"
 #include "cameras/realistic.h"
+#include "cameras/lightfield.h"
 #include "filters/box.h"
 #include "filters/gaussian.h"
 #include "filters/mitchell.h"
@@ -90,13 +91,18 @@
 #include "shapes/cone.h"
 #include "shapes/curve.h"
 #include "shapes/cylinder.h"
+#include "shapes/distanceestimator.h"
 #include "shapes/disk.h"
 #include "shapes/heightfield.h"
 #include "shapes/hyperboloid.h"
+#include "shapes/infinitespheregridde.h"
 #include "shapes/loopsubdiv.h"
+#include "shapes/mandelbulbde.h"
+#include "shapes/newde.h"
 #include "shapes/nurbs.h"
 #include "shapes/paraboloid.h"
 #include "shapes/sphere.h"
+#include "shapes/spherede.h"
 #include "shapes/triangle.h"
 #include "shapes/plymesh.h"
 #include "textures/bilerp.h"
@@ -438,6 +444,21 @@ std::vector<std::shared_ptr<Shape>> MakeShapes(const std::string &name,
         s = CreateSphereShape(object2world, world2object, reverseOrientation,
                               paramSet);
     // Create remaining single _Shape_ types
+    // else if (name == "distanceestimator")
+    //     s = CreateDistanceEstimatorShape(object2world, world2object, reverseOrientation,
+    //                                      paramSet);
+    else if (name == "spherede")
+        s = CreateSphereDEShape(object2world, world2object, reverseOrientation,
+                 paramSet);
+    else if (name == "infinitespheregridde")
+        s = CreateInfiniteSphereGridDEShape(object2world, world2object, reverseOrientation,
+                 paramSet);
+    else if (name == "mandelbulbde")
+        s = CreateMandelbulbDEShape(object2world, world2object, reverseOrientation,
+                                            paramSet);
+    else if (name == "newde")
+        s = CreateNewDEShape(object2world, world2object, reverseOrientation,
+                                    paramSet);
     else if (name == "cylinder")
         s = CreateCylinderShape(object2world, world2object, reverseOrientation,
                                 paramSet);
@@ -810,6 +831,9 @@ Camera *MakeCamera(const std::string &name, const ParamSet &paramSet,
                                        mediumInterface.outside);
     else if (name == "environment")
         camera = CreateEnvironmentCamera(paramSet, animatedCam2World, film,
+                                         mediumInterface.outside);
+    else if (name == "lightfield")
+        camera = CreateLightfieldCamera(paramSet, animatedCam2World, film,
                                          mediumInterface.outside);
     else
         Warning("Camera \"%s\" unknown.", name.c_str());
